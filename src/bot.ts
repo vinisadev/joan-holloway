@@ -1,12 +1,10 @@
-import {
-  Client,
-  GatewayIntentBits,
-  Message,
-  TextChannel,
-  ChannelType,
-} from "discord.js";
+import { Client, GatewayIntentBits, Message, Collection } from "discord.js";
+import fs from "fs";
+import path from "path";
 import dotenv from "dotenv";
-import { PrismaClient } from "@prisma/client";
+import { Command } from "./types/command";
+import { prisma, getServerSettings } from "./utils/database";
+import { saveTicketMessage } from "./utils/ticketSystem";
 
 dotenv.config();
 
@@ -18,115 +16,27 @@ const client = new Client({
   ],
 });
 
-const prisma = new PrismaClient();
+const commands = new Collection<string, Command>();
+const commandFiles = fs
+  .readdirSync(path.join(__dirname, "commands"))
+  .filter((file) => file.endsWith(".ts"));
+
+for (const file of commandFiles) {
+  const commandModule = require(`./commands/${file}`);
+  const command: Command = commandModule.default;
+  commands.set(command.name, command);
+}
 
 client.once("ready", () => {
   console.log("Bot is ready!");
 });
 
-async function getServerSettings(guildId: string) {
-  let settings = await prisma.serverSettings.findUnique({
-    where: { guildId },
-  });
-
-  if (!settings) {
-    settings = await prisma.serverSettings.create({
-      data: { guildId },
-    });
-  }
-
-  return settings;
-}
-
-async function createTicket(
-  guildId: string,
-  channelId: string,
-  creatorId: string
-) {
-  return prisma.ticket.create({
-    data: {
-      guildId,
-      channelId,
-      creatorId,
-    },
-  });
-}
-
-async function closeTicket(ticketId: string) {
-  return prisma.ticket.update({
-    where: { id: ticketId },
-    data: {
-      status: "CLOSED",
-      closedAt: new Date(),
-    },
-  });
-}
-
-async function saveTicketMessage(
-  ticketId: string,
-  authorId: string,
-  content: string
-) {
-  return prisma.ticketMessage.create({
-    data: {
-      ticketId,
-      authorId,
-      content,
-    },
-  });
-}
-
-client.on("messageCreate", async (message) => {
+client.on("messageCreate", async (message: Message) => {
   if (message.author.bot || !message.guild) return;
 
   const settings = await getServerSettings(message.guild.id);
 
-  if (message.content.startsWith(`${settings.prefix}ticket`)) {
-    const ticketChannel = await message.guild.channels.create({
-      name: `ticket-${message.author.username}`,
-      type: ChannelType.GuildText,
-      permissionOverwrites: [
-        {
-          id: message.guild.id,
-          deny: ["ViewChannel"],
-        },
-        {
-          id: message.author.id,
-          allow: ["ViewChannel", "SendMessages"],
-        },
-      ],
-    });
-
-    const ticket = await createTicket(
-      message.guild.id,
-      ticketChannel.id,
-      message.author.id
-    );
-
-    await ticketChannel.send(
-      `Ticket created for ${message.author}. Use \`${settings.prefix}close\` to close this ticket.`
-    );
-    message.reply(`Ticket created! Please check ${ticketChannel}`);
-  } else if (message.content.startsWith(`${settings.prefix}close`)) {
-    const ticket = await prisma.ticket.findFirst({
-      where: {
-        channelId: message.channel.id,
-        status: "OPEN",
-      },
-    });
-
-    if (ticket) {
-      await closeTicket(ticket.id);
-      await message.channel.send(
-        "This ticket is now closed. The channel will be deleted in 5 seconds."
-      );
-      setTimeout(() => {
-        (message.channel as TextChannel).delete();
-      }, 5000);
-    } else {
-      message.reply("This is not an open ticket channel.");
-    }
-  } else if (message.channel.type == ChannelType.GuildText) {
+  if (!message.content.startsWith(settings.prefix)) {
     const ticket = await prisma.ticket.findUnique({
       where: { channelId: message.channel.id },
     });
@@ -134,29 +44,23 @@ client.on("messageCreate", async (message) => {
     if (ticket && ticket.status === "OPEN") {
       await saveTicketMessage(ticket.id, message.author.id, message.content);
     }
+    return;
   }
 
-  if (message.content.startsWith(`${settings.prefix}ping`)) {
-    message.reply("Pong!");
-  } else if (message.content.startsWith(`${settings.prefix}prefix`)) {
-    const args = message.content.split(" ");
-    if (args.length > 1) {
-      const newPrefix = args[1];
-      await prisma.serverSettings.update({
-        where: { guildId: message.guild.id },
-        data: { prefix: newPrefix },
-      });
-      message.reply(`Prefix updated to ${newPrefix}`);
-    } else {
-      message.reply(`Current prefix is ${settings.prefix}`);
-    }
-  } else if (message.content.startsWith(`${settings.prefix}togglemod`)) {
-    const newStatus = !settings.moderationEnabled;
-    await prisma.serverSettings.update({
-      where: { guildId: message.guild.id },
-      data: { moderationEnabled: newStatus },
-    });
-    message.reply(`Moderation ${newStatus ? "enabled" : "disabled"}`);
+  const args = message.content.slice(settings.prefix.length).trim().split(/ +/);
+  const commandName = args.shift()?.toLowerCase();
+
+  if (!commandName) return;
+
+  const command = commands.get(commandName);
+
+  if (!command) return;
+
+  try {
+    await command.execute(message, args, prisma);
+  } catch (error) {
+    console.error(error);
+    await message.reply("There was an error executing that command.");
   }
 });
 
