@@ -18,6 +18,7 @@ model ServerSettings {
   guildId String @unique
   prefix String @default("!")
   welcomeChannelId String?
+  welcomeMessage String?
   moderationEnabled Boolean @default(false)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
