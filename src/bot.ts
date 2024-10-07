@@ -1,4 +1,10 @@
-import { Client, GatewayIntentBits } from "discord.js";
+import {
+  Client,
+  GatewayIntentBits,
+  Message,
+  TextChannel,
+  ChannelType,
+} from "discord.js";
 import dotenv from "dotenv";
 import { PrismaClient } from "@prisma/client";
 
@@ -32,10 +38,103 @@ async function getServerSettings(guildId: string) {
   return settings;
 }
 
+async function createTicket(
+  guildId: string,
+  channelId: string,
+  creatorId: string
+) {
+  return prisma.ticket.create({
+    data: {
+      guildId,
+      channelId,
+      creatorId,
+    },
+  });
+}
+
+async function closeTicket(ticketId: string) {
+  return prisma.ticket.update({
+    where: { id: ticketId },
+    data: {
+      status: "CLOSED",
+      closedAt: new Date(),
+    },
+  });
+}
+
+async function saveTicketMessage(
+  ticketId: string,
+  authorId: string,
+  content: string
+) {
+  return prisma.ticketMessage.create({
+    data: {
+      ticketId,
+      authorId,
+      content,
+    },
+  });
+}
+
 client.on("messageCreate", async (message) => {
   if (message.author.bot || !message.guild) return;
 
   const settings = await getServerSettings(message.guild.id);
+
+  if (message.content.startsWith(`${settings.prefix}ticket`)) {
+    const ticketChannel = await message.guild.channels.create({
+      name: `ticket-${message.author.username}`,
+      type: ChannelType.GuildText,
+      permissionOverwrites: [
+        {
+          id: message.guild.id,
+          deny: ["ViewChannel"],
+        },
+        {
+          id: message.author.id,
+          allow: ["ViewChannel", "SendMessages"],
+        },
+      ],
+    });
+
+    const ticket = await createTicket(
+      message.guild.id,
+      ticketChannel.id,
+      message.author.id
+    );
+
+    await ticketChannel.send(
+      `Ticket created for ${message.author}. Use \`${settings.prefix}close\` to close this ticket.`
+    );
+    message.reply(`Ticket created! Please check ${ticketChannel}`);
+  } else if (message.content.startsWith(`${settings.prefix}close`)) {
+    const ticket = await prisma.ticket.findFirst({
+      where: {
+        channelId: message.channel.id,
+        status: "OPEN",
+      },
+    });
+
+    if (ticket) {
+      await closeTicket(ticket.id);
+      await message.channel.send(
+        "This ticket is now closed. The channel will be deleted in 5 seconds."
+      );
+      setTimeout(() => {
+        (message.channel as TextChannel).delete();
+      }, 5000);
+    } else {
+      message.reply("This is not an open ticket channel.");
+    }
+  } else if (message.channel.type == ChannelType.GuildText) {
+    const ticket = await prisma.ticket.findUnique({
+      where: { channelId: message.channel.id },
+    });
+
+    if (ticket && ticket.status === "OPEN") {
+      await saveTicketMessage(ticket.id, message.author.id, message.content);
+    }
+  }
 
   if (message.content.startsWith(`${settings.prefix}ping`)) {
     message.reply("Pong!");

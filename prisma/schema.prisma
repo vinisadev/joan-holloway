@@ -21,4 +21,26 @@ model ServerSettings {
   moderationEnabled Boolean @default(false)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  tickets Ticket[]
+}
+
+model Ticket {
+  id String @id @default(cuid())
+  guildId String
+  channelId String @unique
+  creatorId String
+  status String @default("OPEN")
+  createdAt DateTime @default(now())
+  closedAt DateTime?
+  server ServerSettings @relation(fields: [guildId], references: [guildId])
+  messages TicketMessage[]
+}
+
+model TicketMessage {
+  id String @id @default(cuid())
+  ticketId String
+  authorId String
+  content String
+  createdAt DateTime @default(now())
+  ticket Ticket @relation(fields: [ticketId], references: [id])
 }
